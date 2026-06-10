@@ -1,0 +1,13 @@
+[server]
+# Disable file watcher — not needed in production, wastes container resources
+runOnSave = false
+
+[browser]
+# Opt out of Streamlit's anonymous usage statistics
+gatherUsageStats = false
+
+[client]
+# Hide full Python tracebacks from visitors (show a generic error message instead)
+showErrorDetails = false
+# Show only the minimal toolbar — removes the Deploy/Edit buttons from the header
+toolbarMode = "minimal"
