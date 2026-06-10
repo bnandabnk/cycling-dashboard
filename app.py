@@ -50,12 +50,7 @@ import requests
 # We use them to calculate "how many days since your last ride."
 from datetime import datetime, date
 
-# Path — a tool for handling file locations on your computer.
-# Different operating systems write file paths differently
-# (Mac: /Users/nanda/file.txt  vs  Windows: C:\Users\nanda\file.txt).
-# Path handles these differences automatically.
-# We use it to save new Strava tokens to the secrets file.
-from pathlib import Path
+import urllib.parse
 
 # This line configures the browser tab when someone opens the app.
 # st.set_page_config() must be the very first streamlit command in the file.
@@ -189,6 +184,10 @@ CYCLING_TYPES    = {"Ride", "VirtualRide", "EBikeRide"}
 # in multiple places) means if we ever rename it, we only change it here.
 NEEDS_REAUTH     = "NEEDS_REAUTH"
 
+# The URL Strava redirects to after the user authorizes.
+# Must match the domain registered in the Strava developer portal.
+REDIRECT_URI = "https://cycling-dashboard-cocnsx37vepb2nuvetef4x.streamlit.app/"
+
 
 # ============================================================
 # FUNCTION: _strava_get
@@ -270,38 +269,28 @@ def _strava_get(endpoint, token, per_page=0):
 # This is part of the "OAuth 2.0" security standard used by most big apps.
 # ============================================================
 def _refresh_strava_token():
-    # st.secrets reads from the file .streamlit/secrets.toml — a private config file
-    # NOT committed to GitHub. It holds your Strava client_id, client_secret,
-    # access_token, and refresh_token.
-    # st.secrets["strava"] retrieves the [strava] section of that file.
+    refresh_token = st.session_state.get("strava_refresh_token")
+    if not refresh_token:
+        return None
     creds = st.secrets["strava"]
-
     try:
-        # requests.post() sends data TO a server (unlike get() which only reads).
-        # Here we are posting our credentials to Strava's token endpoint,
-        # asking it to give us a fresh access token.
         resp = requests.post(
-            STRAVA_TOKEN_URL,  # The URL that handles token exchange
-
-            # "data" is the form fields we send — like filling in a web form.
+            STRAVA_TOKEN_URL,
             data={
-                "client_id":     creds["client_id"],      # Our app's ID on Strava
-                "client_secret": creds["client_secret"],  # Our app's private password
-                "refresh_token": creds["refresh_token"],  # The long-lived renewal token
-                "grant_type":    "refresh_token",         # Tells Strava what we're doing
+                "client_id":     creds["client_id"],
+                "client_secret": creds["client_secret"],
+                "refresh_token": refresh_token,
+                "grant_type":    "refresh_token",
             },
-            timeout=10,  # Give up after 10 seconds if no response
+            timeout=10,
         )
-
-        # If Strava responded successfully (status 200-299):
-        # .json() converts the response text to a Python dictionary.
-        # .get("access_token") looks up "access_token" in that dictionary.
-        # If the key doesn't exist (shouldn't happen), .get() returns None by default.
-        # If Strava responded with an error, return None.
-        return resp.json().get("access_token") if resp.ok else None
-
+        if resp.ok:
+            d = resp.json()
+            if d.get("refresh_token"):
+                st.session_state.strava_refresh_token = d["refresh_token"]
+            return d.get("access_token")
+        return None
     except requests.exceptions.RequestException:
-        # Network error — return None so the caller can handle it gracefully.
         return None
 
 
@@ -348,45 +337,6 @@ def exchange_auth_code(code):
         return None, None, ""
 
 
-# ============================================================
-# FUNCTION: write_tokens_to_secrets
-#
-# After successfully getting new tokens, we save them back to the
-# secrets.toml file on disk. This way they survive the app restarting —
-# next time it loads, it reads the fresh tokens from the file.
-# ============================================================
-def write_tokens_to_secrets(access_token, refresh_token):
-    # Load existing credentials (we need client_id and client_secret to keep them)
-    creds = st.secrets["strava"]
-
-    # Build the file path to .streamlit/secrets.toml.
-    # __file__ = the path of this Python file (app.py).
-    # .parent = the folder that contains app.py.
-    # / ".streamlit" / "secrets.toml" = navigates into the subfolder and file.
-    # The "/" operator on Path objects means "join these path parts."
-    secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
-
-    # Cloud platforms (e.g. Streamlit Community Cloud) have read-only or ephemeral
-    # filesystems — writing to disk will raise a permission error.
-    # We catch that silently: the caller already stores the new token in st.session_state,
-    # so the current session works fine. On the next cold start, the code auto-refreshes
-    # using the long-lived refresh_token stored in the cloud secrets UI.
-    try:
-        # write_text() overwrites the file with this new content string.
-        # The f"..." strings embed variable values into the text.
-        # This recreates the entire [strava] section with the new tokens.
-        secrets_path.write_text(
-            f'[strava]\n'                                   # TOML section header
-            f'client_id     = "{creds["client_id"]}"\n'    # Keep existing client_id
-            f'client_secret = "{creds["client_secret"]}"\n'# Keep existing client_secret
-            f'access_token  = "{access_token}"\n'           # Save new access token
-            f'refresh_token = "{refresh_token}"\n'          # Save new refresh token
-        )
-    except (OSError, PermissionError):
-        # Filesystem is read-only (cloud deployment) — tokens cannot be written to disk.
-        # The refresh_token in the cloud secrets UI is still valid and will be used
-        # to auto-refresh the access_token on every cold start. No action required.
-        pass
 
 
 # ============================================================
@@ -403,20 +353,9 @@ def write_tokens_to_secrets(access_token, refresh_token):
 # The caller unpacks them: athlete, past_rides, strava_error = load_strava_data()
 # ============================================================
 def load_strava_data():
-    creds = st.secrets["strava"]  # Load credentials from secrets.toml
-
-    # st.session_state is streamlit's memory for the current browser session.
-    # When a user clicks a button, streamlit re-runs the entire script from top to bottom.
-    # session_state lets us remember values across those re-runs (like a sticky note).
-    #
-    # "if key not in st.session_state" means: "only set this the very first time."
-    # On subsequent page re-renders, the token is already in session_state, so we skip.
-    if "strava_token" not in st.session_state:
-        # First time loading — read the access token from the secrets file.
-        st.session_state.strava_token = creds["access_token"]
-
-    # Read the token we stored (either just set above, or from a previous re-run).
-    token = st.session_state.strava_token
+    token = st.session_state.get("strava_token")
+    if not token:
+        return None, [], NEEDS_REAUTH
 
     # Ask Strava for up to 30 recent activities using our helper function.
     # "athlete/activities" is the API endpoint for ride/run/swim history.
@@ -445,7 +384,7 @@ def load_strava_data():
         else:
             # The refresh failed entirely — probably wrong credentials in secrets.toml.
             # Return a human-readable error message.
-            return None, [], "Token refresh failed. Check the credentials in `.streamlit/secrets.toml`."
+            return None, [], "Token refresh failed. Your session may have expired — please reconnect."
 
     # Status 0 is our own code for "no internet / couldn't reach Strava at all."
     if status == 0:
@@ -537,6 +476,42 @@ if "calc_time" not in st.session_state:
 if "show_analysis" not in st.session_state:
     st.session_state.show_analysis = False
 
+if "strava_token" not in st.session_state:
+    st.session_state.strava_token = None
+
+if "strava_refresh_token" not in st.session_state:
+    st.session_state.strava_refresh_token = None
+
+if "strava_athlete" not in st.session_state:
+    st.session_state.strava_athlete = None
+
+
+# ============================================================
+# SECTION 3B: OAUTH CALLBACK HANDLER
+#
+# When Strava redirects back after authorization, the URL contains
+# ?code=XXX&scope=... as query parameters. We detect them here,
+# exchange the code for tokens, store in session_state, clear the URL,
+# and rerun — after which the dashboard loads normally.
+# ============================================================
+
+_params = st.query_params
+
+if "code" in _params and st.session_state.strava_token is None:
+    with st.spinner("Connecting your Strava account…"):
+        new_access, new_refresh, granted_scope = exchange_auth_code(_params["code"])
+    if new_access and "activity:read" in granted_scope:
+        st.session_state.strava_token = new_access
+        st.session_state.strava_refresh_token = new_refresh
+        st.query_params.clear()
+        st.rerun()
+    else:
+        st.error("Authorization failed or activity scope not granted. Please try again.")
+        st.query_params.clear()
+elif "error" in _params:
+    st.warning("Strava authorization was cancelled.")
+    st.query_params.clear()
+
 
 # ============================================================
 # SECTION 4: LOAD STRAVA DATA
@@ -564,118 +539,33 @@ has_rides = len(past_rides) > 0
 
 
 # ============================================================
-# SECTION 4A: ONE-TIME OAUTH SETUP
+# SECTION 4A: LOGIN GATE
 #
-# "OAuth" (Open Authorization) is the industry-standard system where you
-# click "Log in with Google/Strava/Facebook" on a website.
-# The first time the app is connected to Strava, it needs special permission
-# to read activity data (not just the public profile).
-# If the current tokens lack that permission, we show a step-by-step guide.
+# If load_strava_data() returned NEEDS_REAUTH, the user has no valid
+# Strava token in their session. Show a login page and stop rendering
+# the dashboard until they connect their account.
 # ============================================================
 
-# Only show this section if load_strava_data() returned the NEEDS_REAUTH sentinel.
 if strava_error == NEEDS_REAUTH:
-    creds = st.secrets["strava"]  # Reload credentials to get the client_id
-
-    # Build the Strava authorization URL.
-    # This URL, when opened in a browser, shows the "Allow/Deny" screen.
-    # The parameters tell Strava:
-    #   - client_id: which app is requesting access
-    #   - response_type=code: we want an authorization code back
-    #   - redirect_uri: where Strava should redirect after authorization
-    #     (we use localhost because we'll grab the code from the URL bar)
-    #   - approval_prompt=force: always show the permission screen (don't skip it)
-    #   - scope=activity:read_all: request permission to read all activities
-    auth_url  = (
-        "https://www.strava.com/oauth/authorize"
-        f"?client_id={creds['client_id']}"
-        "&response_type=code"
-        "&redirect_uri=http://localhost"
-        "&approval_prompt=force"
-        "&scope=activity:read_all"
-    )
-
-    # Show a yellow warning banner at the top of the page.
-    # The double-asterisks **text** make text bold in markdown.
-    st.warning(
-        "**Strava activity access needed.** Your current tokens only cover your public profile. "
-        "Complete the one-time step below to grant ride access — it takes under a minute."
-    )
-
-    # st.expander() creates a collapsible section (accordion).
-    # expanded=True means it starts open.
-    # "with st.expander(...)" means everything indented below goes inside the expander.
-    with st.expander("🔑 Authorise Strava Activity Access", expanded=True):
-        # st.markdown() renders markdown-formatted text on the page.
-        # The f"..." f-string inserts auth_url into the clickable link.
-        st.markdown(f"""
-**Step 1 — Open this link in your browser and click *Authorize*:**
-
-👉 [Authorise Strava Activities]({auth_url})
-
----
-
-**Step 2 — Copy the code from the URL bar**
-
-After you click Authorize, your browser will try (and fail) to open `http://localhost` — that is expected.
-Look at the URL bar. It will look like:
-
-```
-http://localhost/?state=&code=abc1d2ef3g...&scope=read,activity:read_all
-```
-
-Copy the value that appears **between** `code=` and `&scope`.
-
----
-
-**Step 3 — Paste the code below and click Connect:**
-        """)
-
-        # Create a text input box for the user to paste the authorization code.
-        # label_visibility="collapsed" hides the label text above the box.
-        auth_code = st.text_input(
-            "Authorisation code:",
-            placeholder="e.g. abc1d2ef3g4h5i6j7k…",  # Hint text shown inside empty box
-            label_visibility="collapsed",
+    creds = st.secrets["strava"]
+    auth_url = "https://www.strava.com/oauth/authorize?" + urllib.parse.urlencode({
+        "client_id":       creds["client_id"],
+        "response_type":   "code",
+        "redirect_uri":    REDIRECT_URI,
+        "approval_prompt": "auto",
+        "scope":           "activity:read_all",
+    })
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.title("🚴 Cycling Dashboard")
+        st.markdown("### Connect your Strava account to get started")
+        st.markdown(
+            "See your ride history, hydration targets, and training insights — "
+            "personalised to your data."
         )
-
-        # Only show the Connect button if the user has typed something.
-        # The "and" means BOTH conditions must be true.
-        # st.button() draws a button and returns True the moment it is clicked.
-        if auth_code and st.button("✅ Connect Strava Activities", type="primary"):
-            # Show spinner while we exchange the code for real tokens.
-            with st.spinner("Exchanging code for tokens…"):
-                # .strip() removes any accidental spaces or newlines from pasted text.
-                # exchange_auth_code returns 3 values, which we unpack here.
-                new_access, new_refresh, granted_scope = exchange_auth_code(auth_code.strip())
-
-            # Check both that we got a token AND that activity scope was granted.
-            if new_access and "activity:read" in granted_scope:
-                # Save the new tokens to the secrets file so they persist after restart.
-                write_tokens_to_secrets(new_access, new_refresh)
-
-                # Also update session_state so the current session immediately uses the new token.
-                st.session_state.strava_token = new_access
-
-                # Clear the cached Strava responses so the next fetch uses the new token.
-                _strava_get.clear()
-
-                # Show a green success message.
-                st.success(f"✅ Connected! Scopes: `{granted_scope}`. Reloading the dashboard…")
-
-                # st.rerun() tells streamlit to restart the script from the top.
-                # This is like refreshing the page — the dashboard now has full ride access.
-                st.rerun()
-
-            elif new_access:
-                # We got a token but it doesn't include activity scope — user cancelled.
-                st.error(
-                    f"Authorisation succeeded but activity scope was not granted (got: `{granted_scope}`). "
-                    "Make sure you clicked **Authorize** (not **Cancel**) on the Strava page."
-                )
-            else:
-                # Code exchange totally failed — code probably expired.
-                st.error("Code exchange failed. The code may have expired (they last ~10 min) — restart from Step 1.")
+        st.link_button("🔗 Connect with Strava", url=auth_url, use_container_width=True, type="primary")
+        st.caption("You'll be redirected to Strava to authorise, then returned here automatically.")
+    st.stop()
 
 
 # ============================================================
@@ -696,6 +586,13 @@ with st.sidebar:
         _strava_get.clear()
 
         # Restart the script from the top to reload everything fresh.
+        st.rerun()
+
+    if st.button("🔌 Disconnect Strava", use_container_width=True):
+        st.session_state.strava_token = None
+        st.session_state.strava_refresh_token = None
+        st.session_state.strava_athlete = None
+        _strava_get.clear()
         st.rerun()
 
     st.divider()
@@ -900,11 +797,7 @@ elif 17 <= hour_of_day < 21:
 else:
     greeting = "Good night"
 
-# Get the athlete's first name from the Strava profile dictionary.
-# athlete.get("firstname", "Nanda") — if athlete is a valid dict, look up "firstname".
-# If the key doesn't exist, use "Nanda" as fallback.
-# "if athlete else 'Nanda'" — if athlete itself is None (no profile loaded), use "Nanda".
-rider_name = athlete.get("firstname", "Nanda") if athlete else "Nanda"
+rider_name = athlete.get("firstname", "Cyclist") if athlete else "Cyclist"
 
 # Display the main page title with the greeting and rider name.
 # st.title() renders large heading text (the biggest text on the page).
@@ -1343,4 +1236,4 @@ _, footer_center, _ = st.columns([1, 1, 1])
 
 with footer_center:
     # st.caption() renders small, grey, secondary text — perfect for a footer credit.
-    st.caption("Built with Python & Streamlit · Powered by Strava · by Nanda · 2026")
+    st.caption("Built with Python & Streamlit · Powered by Strava · 2026")
