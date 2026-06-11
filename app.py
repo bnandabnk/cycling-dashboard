@@ -463,13 +463,11 @@ def load_strava_data():
 if "tip_idx" not in st.session_state:
     st.session_state.tip_idx = 0
 
-# calc_km = the distance (in km) the user entered for their planned ride. Default: 40 km.
 if "calc_km" not in st.session_state:
-    st.session_state.calc_km = 40.0
+    st.session_state.calc_km = None
 
-# calc_time = the duration (in minutes) the user entered. Default: 90 minutes.
 if "calc_time" not in st.session_state:
-    st.session_state.calc_time = 90
+    st.session_state.calc_time = None
 
 # show_analysis = whether to display the ride analysis section.
 # Starts as False — only becomes True after the user clicks "Calculate."
@@ -568,154 +566,65 @@ if strava_error == NEEDS_REAUTH:
     st.stop()
 
 
-# ============================================================
-# SECTION 5: SIDEBAR — CONTROLS
-#
-# The sidebar is a narrow panel on the left side of the page.
-# "with st.sidebar:" means everything indented below goes into the sidebar.
-# ============================================================
-
-with st.sidebar:
-    # Display a bold header in the sidebar.
-    st.header("⚙️ Controls")
-
-    # Draw a Refresh button. use_container_width=True makes it fill the full sidebar width.
-    # st.button() returns True only in the exact moment it is clicked.
-    if st.button("🔄 Refresh from Strava", use_container_width=True):
-        # Clear the cached Strava data so the next fetch goes to the live API.
-        _strava_get.clear()
-
-        # Restart the script from the top to reload everything fresh.
-        st.rerun()
-
-    if st.button("🔌 Disconnect Strava", use_container_width=True):
-        st.session_state.strava_token = None
-        st.session_state.strava_refresh_token = None
-        st.session_state.strava_athlete = None
-        _strava_get.clear()
-        st.rerun()
-
-    st.divider()
-
-    # Weight slider — used in all hydration and nutrition calculations below.
-    # Every visitor can adjust this to their own body weight so the calculator
-    # gives them accurate, personalised results (not just results for 75 kg).
-    # st.slider() creates a draggable slider that returns the selected integer value.
-    # min_value / max_value = the allowed range.
-    # value = the starting position of the slider (75 kg is a common default).
-    # step = how much the slider moves per tick (1 kg increments).
-    weight_kg = st.slider(
-        "Your weight (kg)",
-        min_value=40,
-        max_value=120,
-        value=75,
-        step=1,
-    )
+weight_kg = 75
 
 
 # ============================================================
 # SECTION 6: RIDE CALCULATIONS
-#
-# This section computes all the numbers used in the Ride Analysis section:
-# - Speed from distance and time
-# - Intensity level (low/moderate/high)
-# - Hydration amounts
-# - Carbohydrate and protein amounts
-#
-# All calculations use the values stored in session_state (the user's inputs).
+# Only runs after the user has submitted distance + time via the form.
 # ============================================================
 
-# weight_kg is set by the sidebar slider above — no hardcoded value here.
-# The slider is rendered in the sidebar (Section 5) before this section runs,
-# so weight_kg is already defined and holds the visitor's chosen value.
+if st.session_state.calc_km is not None and st.session_state.calc_time is not None:
+    target_km        = st.session_state.calc_km
+    target_time_mins = st.session_state.calc_time
+    target_speed_kmh = target_km / (target_time_mins / 60)
+    duration_hours   = target_time_mins / 60
 
-# Pull the user's stored inputs out of session_state.
-# These were set when the user clicked "Calculate" (or are defaults if not clicked yet).
-target_km        = st.session_state.calc_km    # Planned ride distance in km
-target_time_mins = st.session_state.calc_time  # Planned ride duration in minutes
+    if target_speed_kmh < 20:
+        intensity_multiplier = 0.8
+        intensity_label      = "🟢 Low"
+    elif target_speed_kmh <= 26:
+        intensity_multiplier = 1.0
+        intensity_label      = "🟡 Moderate"
+    else:
+        intensity_multiplier = 1.2
+        intensity_label      = "🔴 High"
 
-# Calculate the implied average speed.
-# Speed = Distance ÷ Time.
-# But time must be in HOURS for this formula. Dividing minutes by 60 gives hours.
-# e.g. 40 km in 90 mins → 90/60 = 1.5 hours → 40/1.5 = 26.67 km/h
-target_speed_kmh = target_km / (target_time_mins / 60)
+    pre_ride_ml    = weight_kg * 6
+    water_per_hour = 500 * intensity_multiplier
+    active_ml      = water_per_hour * duration_hours
+    total_ml       = pre_ride_ml + active_ml
 
-# Store duration in hours as a variable — used in several formulas below.
-duration_hours   = target_time_mins / 60
+    if duration_hours < 1:
+        carb_pre_g       = round(weight_kg * 1.5)
+        carb_pre_timing  = "1–2 hours before"
+        carb_during_g    = 0
+        carb_during_note = "Water only — short ride needs no solid fuel"
+        carb_ratio_used  = 1.5
+        carb_rate_used   = 0
+    elif duration_hours < 1.5:
+        carb_pre_g       = round(weight_kg * 2.0)
+        carb_pre_timing  = "2–3 hours before"
+        carb_during_g    = round(30 * duration_hours)
+        carb_during_note = "~30 g/hr (one energy gel or a banana per hour)"
+        carb_ratio_used  = 2.0
+        carb_rate_used   = 30
+    else:
+        carb_pre_g       = round(weight_kg * 3.0)
+        carb_pre_timing  = "3–4 hours before"
+        carb_during_g    = round(60 * duration_hours)
+        carb_during_note = "~60 g/hr (two gels or an energy bar + gel each hour)"
+        carb_ratio_used  = 3.0
+        carb_rate_used   = 60
 
-# Determine ride intensity based on speed.
-# if/elif/else is Python's way of making decisions (like a traffic light).
-# Only ONE of these blocks runs — the first condition that is True.
-if target_speed_kmh < 20:
-    # Under 20 km/h = slow, easy ride
-    intensity_multiplier = 0.8   # Less water needed (0.8× the base amount)
-    intensity_label      = "🟢 Low"
-elif target_speed_kmh <= 26:
-    # 20–26 km/h = moderate effort
-    intensity_multiplier = 1.0   # Normal water amount (1.0× = no change)
-    intensity_label      = "🟡 Moderate"
+    carb_post_g    = round(weight_kg * 1.2)
+    protein_post_g = round(weight_kg * 0.4)
 else:
-    # Over 26 km/h = fast, hard ride
-    intensity_multiplier = 1.2   # More water needed (1.2× the base amount)
-    intensity_label      = "🔴 High"
-
-# --- HYDRATION CALCULATIONS ---
-
-# Pre-ride hydration: 6 ml per kg of body weight.
-# This is a sports science guideline for pre-loading fluids.
-# e.g. 75 kg × 6 = 450 ml to drink before you start.
-pre_ride_ml    = weight_kg * 6
-
-# Base rate is 500 ml per hour, scaled by intensity.
-# e.g. moderate intensity: 500 × 1.0 = 500 ml/hr
-#      high intensity:     500 × 1.2 = 600 ml/hr
-water_per_hour = 500 * intensity_multiplier
-
-# Total water needed during the ride = rate per hour × number of hours.
-# e.g. 500 ml/hr × 1.5 hrs = 750 ml
-active_ml      = water_per_hour * duration_hours
-
-# Grand total = pre-ride + during-ride water combined.
-total_ml       = pre_ride_ml + active_ml
-
-# --- CARBOHYDRATE CALCULATIONS ---
-# The amount of carbs you need scales with how long you ride.
-# Short rides: your stored glycogen is enough.
-# Long rides: you must eat on the bike to avoid "bonking" (running out of energy).
-
-if duration_hours < 1:
-    # Under 1 hour — your body has enough stored glycogen, no on-bike eating needed.
-    carb_pre_g       = round(weight_kg * 1.5)  # Light pre-ride meal: 1.5 g per kg of body weight
-    carb_pre_timing  = "1–2 hours before"       # When to eat it
-    carb_during_g    = 0                         # No carbs needed during the ride
-    carb_during_note = "Water only — short ride needs no solid fuel"
-    carb_ratio_used  = 1.5                       # Stored for display in the breakdown section
-    carb_rate_used   = 0                         # Stored for display in the breakdown section
-
-elif duration_hours < 1.5:
-    # 1 to 1.5 hours — moderate fuelling needed.
-    carb_pre_g       = round(weight_kg * 2.0)  # Medium pre-ride meal: 2 g per kg
-    carb_pre_timing  = "2–3 hours before"
-    carb_during_g    = round(30 * duration_hours)  # 30 grams of carbs per hour on the bike
-    carb_during_note = "~30 g/hr (one energy gel or a banana per hour)"
-    carb_ratio_used  = 2.0
-    carb_rate_used   = 30
-
-else:
-    # 1.5+ hours — serious fuelling required to prevent bonking.
-    carb_pre_g       = round(weight_kg * 3.0)  # Large pre-ride meal: 3 g per kg
-    carb_pre_timing  = "3–4 hours before"
-    carb_during_g    = round(60 * duration_hours)  # 60 grams of carbs per hour on the bike
-    carb_during_note = "~60 g/hr (two gels or an energy bar + gel each hour)"
-    carb_ratio_used  = 3.0
-    carb_rate_used   = 60
-
-# Post-ride recovery nutrition — same formula regardless of ride length.
-# 1.2 g of carbs per kg to replenish glycogen stores.
-carb_post_g    = round(weight_kg * 1.2)
-
-# 0.4 g of protein per kg to repair muscle fibres broken down during exercise.
-protein_post_g = round(weight_kg * 0.4)
+    target_km = target_time_mins = target_speed_kmh = duration_hours = None
+    intensity_multiplier = intensity_label = None
+    pre_ride_ml = water_per_hour = active_ml = total_ml = None
+    carb_pre_g = carb_pre_timing = carb_during_g = carb_during_note = None
+    carb_ratio_used = carb_rate_used = carb_post_g = protein_post_g = None
 
 
 # ============================================================
@@ -765,14 +674,8 @@ if has_rides:
         # Not enough rides for a trend — set to 0 (neutral).
         speed_trend = 0.0
 
-    # Suggest a speed 2% above their historical average.
-    # Multiplying by 1.02 = adding 2%.
-    # This is the standard "progressive overload" principle: push just slightly harder each time.
     suggested_speed    = hist_avg_speed * 1.02
-
-    # Calculate how long it would take to cover the target distance at the suggested speed.
-    # Time = Distance ÷ Speed, then × 60 to convert hours to minutes.
-    suggested_time_min = (target_km / suggested_speed) * 60
+    suggested_time_min = (target_km / suggested_speed) * 60 if target_km is not None else None
 
 
 # ============================================================
@@ -799,9 +702,20 @@ else:
 
 rider_name = athlete.get("firstname", "Cyclist") if athlete else "Cyclist"
 
-# Display the main page title with the greeting and rider name.
-# st.title() renders large heading text (the biggest text on the page).
-st.title(f"🚴 {greeting}, {rider_name}!")
+_title_col, _btns_col = st.columns([10, 1])
+with _title_col:
+    st.title(f"🚴 {greeting}, {rider_name}!")
+with _btns_col:
+    st.write("")
+    if st.button("🔄", help="Refresh from Strava", use_container_width=True):
+        _strava_get.clear()
+        st.rerun()
+    if st.button("🔌", help="Disconnect Strava", use_container_width=True):
+        st.session_state.strava_token = None
+        st.session_state.strava_refresh_token = None
+        st.session_state.strava_athlete = None
+        _strava_get.clear()
+        st.rerun()
 
 # Show different content below the title depending on the connection status.
 if strava_error:
@@ -846,272 +760,180 @@ else:
 # st.divider() draws a horizontal line across the page to separate sections.
 st.divider()
 
+_tips_col, _analysis_col = st.columns([1, 2], gap="large")
 
 # ============================================================
-# SECTION 9: DAILY KNOWLEDGE — CYCLING TIPS
-#
-# Shows one tip at a time from the big list defined in Section 1.
-# A button lets the user cycle through to the next tip.
-# The current tip index is stored in session_state so it persists across re-renders.
+# SECTION 9: DAILY KNOWLEDGE — CYCLING TIPS (left column)
 # ============================================================
 
-# st.subheader() renders medium-size heading text.
-st.subheader("💡 Daily Knowledge")
+with _tips_col:
+    st.subheader("💡 Daily Knowledge")
 
-# Split the row into two columns: one wide (5 parts) and one narrow (1 part).
-# st.columns([5, 1]) returns two column objects. We name them tip_col and btn_col.
-tip_col, btn_col = st.columns([5, 1])
+    _filtered_tips = cycling_tips_categorized
+    _safe_idx = st.session_state.tip_idx % len(_filtered_tips)
+    _tip_data = _filtered_tips[_safe_idx]
 
-with btn_col:
-    # st.write("") adds a small blank space — a trick to vertically align the button
-    # with the tip text box beside it.
-    st.write("")
+    st.info(f"**[{_tip_data['category']}]** {_tip_data['tip']}")
+    st.caption(f"Tip {_safe_idx + 1} of {len(_filtered_tips)}")
 
-    # Draw the "Next Tip" button. It returns True only when clicked.
-    next_tip_btn = st.button("🔄 Next Tip", use_container_width=True)
-
-# For now, all tips are shown (no category filtering).
-# This variable exists in case a filter dropdown is added in future.
-filtered_tips = cycling_tips_categorized
-
-# When the user clicks "Next Tip," increment the tip index by 1.
-# The "%" (modulo) operator wraps around: when we reach the last tip,
-# the next index becomes 0 (the first tip) again.
-# e.g. (49 + 1) % 50 = 0  ← wraps from last tip back to first.
-if next_tip_btn:
-    st.session_state.tip_idx = (st.session_state.tip_idx + 1) % len(filtered_tips)
-
-# Safety check: ensure the index is always within bounds.
-# This guards against any edge case where tip_idx might be out of range.
-safe_idx = st.session_state.tip_idx % len(filtered_tips)
-
-# Look up the tip at the current index position in the list.
-tip_data = filtered_tips[safe_idx]
-
-with tip_col:
-    # st.info() shows a blue information box with the tip text inside.
-    # The f-string formats it as: [Category] Tip text here
-    st.info(f"**[{tip_data['category']}]** {tip_data['tip']}")
-
-# st.caption() displays small grey text — used for supplementary info.
-# Shows "Tip 3 of 50 · click 🔄 Next Tip to switch" for example.
-st.caption(f"Tip {safe_idx + 1} of {len(filtered_tips)} · click **🔄 Next Tip** to switch")
-
-st.divider()
+    if st.button("🔄 Next Tip", use_container_width=True):
+        st.session_state.tip_idx = (st.session_state.tip_idx + 1) % len(_filtered_tips)
+        st.rerun()
 
 
 # ============================================================
-# SECTION 10: NEXT RIDE ANALYSIS
-#
-# This section has three parts:
-#   Part 1 — Input form: user enters distance and time (always visible)
-#   Part 2 — Ride analysis + smart training insights (shown after "Calculate")
-#   Part 3 — Hydration & fuel guide (shown after "Calculate")
+# SECTION 10: NEXT RIDE ANALYSIS (right column)
 # ============================================================
 
-# st.header() is larger than st.subheader() — the second-largest heading size.
-st.header("📊 Next Ride Analysis")
+with _analysis_col:
+    st.header("📊 Next Ride Analysis")
 
-# --- PART 1: PLAN YOUR NEXT RIDE (always visible) ---
-st.subheader("🎯 Plan Your Next Ride")
-st.caption("Speed and intensity are calculated automatically from distance and time.")
+    st.subheader("🎯 Plan Your Next Ride")
+    st.caption("Speed and intensity are calculated automatically from distance and time.")
 
-# Split the form into two equal columns side by side.
-plan_col1, plan_col2 = st.columns(2)
+    _plan_col1, _plan_col2 = st.columns(2)
 
-with plan_col1:
-    # st.number_input() creates a numeric text box with up/down arrows.
-    # min_value and max_value set the allowed range.
-    # value = the current default (from session_state).
-    # step = how much each click of the arrows changes the value.
-    target_km_input = st.number_input(
-        "Target Distance (km)",
-        min_value=5.0, max_value=300.0,      # Can't enter below 5 or above 300
-        value=float(st.session_state.calc_km), # Show the saved value; float() ensures decimal type
-        step=0.5,                             # Each arrow click changes by 0.5 km
-    )
-
-with plan_col2:
-    target_time_input = st.number_input(
-        "Target Time (minutes)",
-        min_value=15, max_value=600,          # 15 minutes minimum, 10 hours maximum
-        value=int(st.session_state.calc_time), # Show the saved value; int() ensures whole number
-        step=5,                               # Each arrow click changes by 5 minutes
-    )
-
-# The Calculate button. type="primary" makes it the blue highlighted button.
-if st.button("🚀 Calculate", type="primary"):
-    # Save the user's entered values to session_state.
-    # These become the "truth" used in the calculations in Section 6.
-    st.session_state.calc_km   = target_km_input
-    st.session_state.calc_time = target_time_input
-
-    # Set the flag to True so the analysis section below becomes visible.
-    st.session_state.show_analysis = True
-
-    # Re-run the script from the top so Section 6 recalculates with the new values.
-    st.rerun()
-
-
-# --- PARTS 2 & 3: Shown only after the user has clicked Calculate ---
-# st.session_state.show_analysis is False by default and True after clicking Calculate.
-if st.session_state.show_analysis:
-    st.divider()
-
-    # --- PART 2: RIDE ANALYSIS ---
-    st.subheader("📈 Ride Analysis")
-
-    # Show a caption summarising the user's plan and the implied speed.
-    # :.1f formats a float to 1 decimal place, e.g. 26.666... → 26.7
-    st.caption(
-        f"Plan: **{target_km} km** in **{target_time_mins} min** "
-        f"→ implied speed **{target_speed_kmh:.1f} km/h**"
-    )
-
-    # Split into one narrow column and one wide column (ratio 1:3).
-    i_col1, i_col2 = st.columns([1, 3])
-
-    with i_col1:
-        # st.metric() shows a labelled number in a highlighted box.
-        # Commonly used for key statistics (KPIs).
-        st.metric("Predicted Intensity", intensity_label)
-
-    with i_col2:
-        st.write("")  # Small spacing gap
-        # Explain the intensity calculation in plain text.
-        st.markdown(
-            f"Targeting **{target_km} km** in **{target_time_mins} minutes** implies an average speed of "
-            f"**{target_speed_kmh:.1f} km/h**, classified as **{intensity_label}** intensity "
-            f"(hydration multiplier: **{intensity_multiplier}×**)."
+    with _plan_col1:
+        target_km_input = st.number_input(
+            "Target Distance (km)",
+            min_value=5.0, max_value=300.0,
+            value=st.session_state.calc_km,
+            placeholder="e.g. 40",
+            step=0.5,
         )
 
-    st.divider()
-    st.subheader("🧠 Smart Training Insights")
-
-    # If no Strava rides exist, show a prompt to log some rides.
-    if not has_rides:
-        st.info("Log some rides on Strava and your speed targets will appear here automatically.")
-    else:
-        # We have ride data — show the personalised speed targets.
-        st.caption(
-            f"Speed targets derived from your last **{last_n} Strava rides** — "
-            "updates automatically as new rides are recorded."
+    with _plan_col2:
+        target_time_input = st.number_input(
+            "Target Time (minutes)",
+            min_value=15, max_value=600,
+            value=st.session_state.calc_time,
+            placeholder="e.g. 90",
+            step=5,
         )
 
-        # Three equal columns for the three speed metrics.
-        s1, s2, s3 = st.columns(3)
-
-        with s1:
-            # Build the trend label string.
-            # If speed_trend > 0: "+1.2 km/h improving"
-            # If negative: "-0.8 km/h declining"
-            trend_label = (
-                f"+{speed_trend:.1f} km/h improving" if speed_trend > 0
-                else f"{speed_trend:.1f} km/h declining"
-            )
-
-            # st.metric() with a "delta" shows an arrow indicator (green up, red down).
-            # delta is shown only when we have enough rides for a trend (last_n >= 4).
-            # "delta=None" hides the delta arrow entirely.
-            st.metric(
-                "Your Recent Avg Speed",
-                f"{hist_avg_speed:.1f} km/h",
-                delta=trend_label if last_n >= 4 else None,  # Only show trend if enough data
-                help="Mean of your last 10 Strava rides."    # Tooltip shown on hover
-            )
-
-        with s2:
-            # Show the suggested target speed (2% above historical average).
-            st.metric(
-                "Suggested Target Speed",
-                f"{suggested_speed:.1f} km/h",
-                # Delta shows the difference from their average.
-                # :.2f formats to 2 decimal places.
-                delta=f"+{suggested_speed - hist_avg_speed:.2f} km/h vs your average",
-                help="2% above your historical average — the standard progressive overload step."
-            )
-
-        with s3:
-            # Show the predicted time if the user rides at their suggested speed.
-            st.metric(
-                f"Suggested Time for {target_km:.0f} km",  # :.0f = no decimal places
-                f"{suggested_time_min:.0f} min",
-                help=f"Time to cover {target_km} km at your suggested pace of {suggested_speed:.1f} km/h."
-            )
-
-        # Show a contextual message based on how the user's target compares to their history.
-        if target_speed_kmh > suggested_speed * 1.05:
-            # Target is more than 5% above their average → ambitious warning.
-            st.warning(
-                f"⚡ Your target ({target_speed_kmh:.1f} km/h) is **more than 5% above your Strava average**. "
-                f"Ambitious — ensure you're well-rested and carb-loaded!"
-            )
-        elif target_speed_kmh < hist_avg_speed * 0.90:
-            # Target is below 90% of their average → easy/recovery ride note.
-            st.info(
-                f"🧘 Your target ({target_speed_kmh:.1f} km/h) is below your usual pace — "
-                f"looks like a **recovery or easy ride**. A smart choice."
-            )
+    if st.button("🚀 Calculate", type="primary", use_container_width=True):
+        if target_km_input is None or target_time_input is None:
+            st.error("Please enter both a target distance and time.")
         else:
-            # Target is within a healthy range of their historical average → green success.
-            st.success(
-                f"✅ Your target ({target_speed_kmh:.1f} km/h) sits well within your Strava range — "
-                f"a solid, achievable goal!"
+            st.session_state.calc_km   = target_km_input
+            st.session_state.calc_time = target_time_input
+            st.session_state.show_analysis = True
+            st.rerun()
+
+    if st.session_state.show_analysis:
+        st.markdown("""
+        <div style="background:#e8f4fd; border-left:4px solid #1a73e8;
+                    padding:10px 16px; border-radius:6px; margin:16px 0 4px 0;">
+            ✅ <strong>Results for your planned ride</strong>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.container(border=True):
+            st.subheader("📈 Ride Analysis")
+            st.caption(
+                f"Plan: **{target_km} km** in **{target_time_mins} min** "
+                f"→ implied speed **{target_speed_kmh:.1f} km/h**"
             )
 
-    st.divider()
+            _i1, _i2 = st.columns([1, 3])
+            with _i1:
+                st.metric("Predicted Intensity", intensity_label)
+            with _i2:
+                st.write("")
+                st.markdown(
+                    f"Targeting **{target_km} km** in **{target_time_mins} minutes** implies an average speed of "
+                    f"**{target_speed_kmh:.1f} km/h**, classified as **{intensity_label}** intensity "
+                    f"(hydration multiplier: **{intensity_multiplier}×**)."
+                )
 
-    # --- PART 3: HYDRATION & FUEL GUIDE ---
-    st.subheader("💧 Hydration & Fuel Guide")
+            st.divider()
+            st.subheader("🧠 Smart Training Insights")
 
-    # --- HYDRATION METRICS ---
-    st.markdown("**Hydration Plan**")
+            if not has_rides:
+                st.info("Log some rides on Strava and your speed targets will appear here automatically.")
+            else:
+                st.caption(
+                    f"Speed targets derived from your last **{last_n} Strava rides** — "
+                    "updates automatically as new rides are recorded."
+                )
 
-    # Four equal columns for the four hydration numbers.
-    h1, h2, h3, h4 = st.columns(4)
+                _s1, _s2, _s3 = st.columns(3)
 
-    with h1:
-        # :.0f in the f-string rounds to 0 decimal places (whole number).
-        # help= adds a tooltip shown when the user hovers over the metric.
-        st.metric("Pre-Ride", f"{pre_ride_ml:.0f} ml", help="Drink in the 2 hours before you start.")
-    with h2:
-        st.metric("During (per hour)", f"{water_per_hour:.0f} ml/hr", help="Sip steadily each hour on the bike.")
-    with h3:
-        st.metric("During (total)", f"{active_ml:.0f} ml", help="Total water target across the full ride.")
-    with h4:
-        st.metric("Grand Total", f"{total_ml:.0f} ml", help="Pre-ride + full-ride water combined.")
+                with _s1:
+                    _trend_label = (
+                        f"+{speed_trend:.1f} km/h improving" if speed_trend > 0
+                        else f"{speed_trend:.1f} km/h declining"
+                    )
+                    st.metric(
+                        "Your Recent Avg Speed",
+                        f"{hist_avg_speed:.1f} km/h",
+                        delta=_trend_label if last_n >= 4 else None,
+                        help="Mean of your last 10 Strava rides."
+                    )
 
-    # --- CARBOHYDRATE METRICS ---
-    st.markdown("**Carb Fuel Guide**")
+                with _s2:
+                    st.metric(
+                        "Suggested Target Speed",
+                        f"{suggested_speed:.1f} km/h",
+                        delta=f"+{suggested_speed - hist_avg_speed:.2f} km/h vs your average",
+                        help="2% above your historical average — the standard progressive overload step."
+                    )
 
-    # Three equal columns for pre-ride, during, and post-ride nutrition.
-    c1, c2, c3 = st.columns(3)
+                with _s3:
+                    st.metric(
+                        f"Suggested Time for {target_km:.0f} km",
+                        f"{suggested_time_min:.0f} min",
+                        help=f"Time to cover {target_km} km at {suggested_speed:.1f} km/h."
+                    )
 
-    with c1:
-        st.markdown("**Pre-Ride**")
-        # carb_pre_timing is the string like "2–3 hours before" (calculated in Section 6).
-        st.metric(f"Carbs ({carb_pre_timing})", f"{carb_pre_g} g")
-        # st.caption() shows small explanatory text below the metric.
-        st.caption("e.g. oats, rice, pasta, banana, toast with honey")
+                if target_speed_kmh > suggested_speed * 1.05:
+                    st.warning(
+                        f"⚡ Your target ({target_speed_kmh:.1f} km/h) is **more than 5% above your Strava average**. "
+                        "Ambitious — ensure you're well-rested and carb-loaded!"
+                    )
+                elif target_speed_kmh < hist_avg_speed * 0.90:
+                    st.info(
+                        f"🧘 Your target ({target_speed_kmh:.1f} km/h) is below your usual pace — "
+                        "looks like a **recovery or easy ride**. A smart choice."
+                    )
+                else:
+                    st.success(
+                        f"✅ Your target ({target_speed_kmh:.1f} km/h) sits well within your Strava range — "
+                        "a solid, achievable goal!"
+                    )
 
-    with c2:
-        st.markdown("**During Ride**")
-        st.metric("Carbs (total)", f"{carb_during_g} g")
-        # carb_during_note is the string like "~30 g/hr (one energy gel or a banana per hour)".
-        st.caption(carb_during_note)
+            st.divider()
+            st.subheader("💧 Hydration & Fuel Guide")
 
-    with c3:
-        st.markdown("**Post-Ride** *(within 30 min)*")
-        st.metric("Carbs", f"{carb_post_g} g")
-        st.metric("Protein", f"{protein_post_g} g")
-        st.caption("e.g. chocolate milk, Greek yogurt + fruit, recovery shake")
+            st.markdown("**Hydration Plan**")
+            _h1, _h2, _h3, _h4 = st.columns(4)
+            with _h1:
+                st.metric("Pre-Ride", f"{pre_ride_ml:.0f} ml", help="Drink in the 2 hours before you start.")
+            with _h2:
+                st.metric("During (per hour)", f"{water_per_hour:.0f} ml/hr", help="Sip steadily each hour on the bike.")
+            with _h3:
+                st.metric("During (total)", f"{active_ml:.0f} ml", help="Total water target across the full ride.")
+            with _h4:
+                st.metric("Grand Total", f"{total_ml:.0f} ml", help="Pre-ride + full-ride water combined.")
 
-    # An expandable section showing the exact maths behind every number.
-    # st.expander() creates a collapsible accordion. expanded=False means it starts closed.
-    with st.expander("📐 See Full Calculation Breakdown"):
-        # st.write() with a multi-line f-string renders formatted text including the formula.
-        # The backtick-wrapped code `formula` renders in monospace font.
-        st.write(f"""
+            st.markdown("**Carb Fuel Guide**")
+            _c1, _c2, _c3 = st.columns(3)
+            with _c1:
+                st.markdown("**Pre-Ride**")
+                st.metric(f"Carbs ({carb_pre_timing})", f"{carb_pre_g} g")
+                st.caption("e.g. oats, rice, pasta, banana, toast with honey")
+            with _c2:
+                st.markdown("**During Ride**")
+                st.metric("Carbs (total)", f"{carb_during_g} g")
+                st.caption(carb_during_note)
+            with _c3:
+                st.markdown("**Post-Ride** *(within 30 min)*")
+                st.metric("Carbs", f"{carb_post_g} g")
+                st.metric("Protein", f"{protein_post_g} g")
+                st.caption("e.g. chocolate milk, Greek yogurt + fruit, recovery shake")
+
+            with st.expander("📐 See Full Calculation Breakdown"):
+                st.write(f"""
 **Your Inputs:**
 - Target: **{target_km} km** in **{target_time_mins} min** ({duration_hours:.1f} hrs)
 - Derived speed: **{target_speed_kmh:.1f} km/h** → Intensity: **{intensity_label}** (×{intensity_multiplier})
@@ -1119,17 +941,17 @@ if st.session_state.show_analysis:
 ---
 
 **Hydration Formulas:**
-- Pre-ride: `75 × 6 = {pre_ride_ml:.0f} ml`
+- Pre-ride: `{weight_kg} × 6 = {pre_ride_ml:.0f} ml`
 - During (per hour): `500 ml × {intensity_multiplier} = {water_per_hour:.0f} ml/hr`
 - During (total): `{water_per_hour:.0f} × {duration_hours:.1f} hrs = {active_ml:.0f} ml`
 - Grand total: `{pre_ride_ml:.0f} + {active_ml:.0f} = {total_ml:.0f} ml`
 
 **Carb Formulas:**
-- Pre-ride: `75 kg × {carb_ratio_used} g/kg = {carb_pre_g} g`
+- Pre-ride: `{weight_kg} kg × {carb_ratio_used} g/kg = {carb_pre_g} g`
 - During: `{carb_rate_used} g/hr × {duration_hours:.1f} hrs = {carb_during_g} g`
-- Post-ride carbs: `75 × 1.2 g/kg = {carb_post_g} g`
-- Post-ride protein: `75 × 0.4 g/kg = {protein_post_g} g`
-        """)
+- Post-ride carbs: `{weight_kg} × 1.2 g/kg = {carb_post_g} g`
+- Post-ride protein: `{weight_kg} × 0.4 g/kg = {protein_post_g} g`
+                """)
 
 st.divider()
 
